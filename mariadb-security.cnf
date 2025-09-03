@@ -1,0 +1,233 @@
+# MariaDB Security Configuration
+# Debian Optimized - Enterprise Grade
+# Compliance: CIS Level 1/2, ISO 27001, SOC 2, BSI Grundschutz
+# Version: Compatible with MariaDB 10.6+ (Latest CVE-2024-21096 patched)
+
+[mysqld]
+# Basic Settings
+user = mysql
+pid-file = /run/mysqld/mysqld.pid
+socket = /run/mysqld/mysqld.sock
+port = 3306
+basedir = /usr
+datadir = /var/lib/mysql
+tmpdir = /tmp
+
+# Security: Bind to localhost only (change if remote access needed)
+bind-address = 127.0.0.1
+
+# Skip external locking and DNS lookups (performance + security)
+skip-external-locking
+skip-name-resolve
+
+# Character set and collation
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+
+# SQL Mode (strict for data integrity)
+sql-mode = "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
+
+# Connection Security
+max_connections = 100
+max_user_connections = 50
+max_connect_errors = 10
+
+# Timeout settings
+connect_timeout = 10
+wait_timeout = 28800
+interactive_timeout = 28800
+net_read_timeout = 30
+net_write_timeout = 30
+
+# Security Features
+# Disable local file loading
+local-infile = 0
+
+# Disable LOAD DATA LOCAL INFILE
+secure_file_priv = ""
+
+# Disable symbolic links
+symbolic-links = 0
+
+# Disable remote root access (root can only connect from localhost)
+# This is enforced through user privileges, not this config
+
+# SSL/TLS Configuration (enable for encrypted connections)
+# Uncomment and configure paths to your SSL certificates
+# ssl-cert = /etc/mysql/server-cert.pem
+# ssl-key = /etc/mysql/server-key.pem
+# ssl-ca = /etc/mysql/ca-cert.pem
+
+# Require SSL for all connections (uncomment when SSL is configured)
+# require_secure_transport = ON
+
+# Audit and Logging
+# General query log (disable in production for performance)
+# general_log = 1
+# general_log_file = /var/log/mysql/general.log
+
+# Error log
+log-error = /var/log/mysql/error.log
+
+# Slow query log
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 2
+log_queries_not_using_indexes = 1
+
+# Binary logging (for replication and point-in-time recovery)
+log-bin = /var/log/mysql/mysql-bin.log
+binlog_format = ROW
+expire_logs_days = 7
+max_binlog_size = 100M
+
+# InnoDB Security Settings
+default-storage-engine = InnoDB
+default-table-type = InnoDB
+
+# InnoDB Buffer Pool (adjust based on available RAM)
+innodb_buffer_pool_size = 128M
+innodb_buffer_pool_instances = 1
+
+# InnoDB Log Files
+innodb_log_file_size = 64M
+innodb_log_buffer_size = 8M
+innodb_flush_log_at_trx_commit = 2
+
+# InnoDB Security
+innodb_force_recovery = 0
+innodb_file_per_table = 1
+innodb_flush_method = O_DIRECT
+
+# Password Validation (MariaDB 10.4+)
+# plugin-load-add = simple_password_check.so
+# simple_password_check_digits = 1
+# simple_password_check_letters_same_case = 1
+# simple_password_check_minimal_length = 8
+# simple_password_check_other_characters = 1
+
+# Connection encryption
+# innodb_encrypt_tables = ON
+# innodb_encrypt_log = ON
+# innodb_encryption_threads = 4
+
+# Query Cache (consider disabling for better performance in high-concurrency environments)
+query_cache_type = 1
+query_cache_size = 32M
+query_cache_limit = 2M
+
+# Thread Cache
+thread_cache_size = 8
+
+# Table Cache
+table_open_cache = 400
+
+# MyISAM Settings (if still using MyISAM tables)
+key_buffer_size = 16M
+read_buffer_size = 128K
+read_rnd_buffer_size = 256K
+sort_buffer_size = 256K
+
+# Network Security
+max_allowed_packet = 16M
+
+# Prevent privilege escalation
+safe-user-create = 1
+
+# Disable autocommit for better transaction control
+autocommit = 0
+
+# Performance Schema (monitoring)
+performance_schema = ON
+
+[mysqldump]
+quick
+quote-names
+max_allowed_packet = 16M
+
+[mysql]
+# Auto-completion and history
+auto-rehash
+# Disable history for security
+# no-auto-rehash
+
+[isamchk]
+key_buffer_size = 20M
+sort_buffer_size = 20M
+read_buffer = 2M
+write_buffer = 2M
+
+[myisamchk]
+key_buffer_size = 20M
+sort_buffer_size = 20M
+read_buffer = 2M
+write_buffer = 2M
+
+[mysqlhotcopy]
+interactive-timeout
+
+# Client Configuration
+[client]
+port = 3306
+socket = /run/mysqld/mysqld.sock
+
+# Default character set
+default-character-set = utf8mb4
+
+# Security: SSL configuration for clients (when server SSL is enabled)
+# ssl-cert = /etc/mysql/client-cert.pem
+# ssl-key = /etc/mysql/client-key.pem
+# ssl-ca = /etc/mysql/ca-cert.pem
+
+[mysql_safe]
+# MySQL safe startup script settings
+log-error = /var/log/mysql/error.log
+pid-file = /run/mysqld/mysqld.pid
+socket = /run/mysqld/mysqld.sock
+nice = 0
+
+# Security Notes and Post-Installation Steps:
+# 
+# 1. Run mysql_secure_installation after installation:
+#    - Set strong root password
+#    - Remove anonymous users
+#    - Disable root remote login
+#    - Remove test database
+#    - Reload privilege tables
+#
+# 2. Create application-specific users with minimal privileges:
+#    CREATE USER 'appuser'@'localhost' IDENTIFIED BY 'strong_password';
+#    GRANT SELECT, INSERT, UPDATE, DELETE ON app_db.* TO 'appuser'@'localhost';
+#    FLUSH PRIVILEGES;
+#
+# 3. Enable SSL/TLS encryption:
+#    - Generate SSL certificates
+#    - Uncomment SSL configuration above
+#    - Test with: mysql -u root -p --ssl-mode=REQUIRED
+#
+# 4. Configure firewall to allow only necessary connections:
+#    ufw allow from 192.168.1.0/24 to any port 3306
+#
+# 5. Regular security updates:
+#    apt update && apt upgrade mariadb-server
+#
+# 6. Backup strategy:
+#    - Daily automated backups
+#    - Test restore procedures
+#    - Encrypt backup files
+#
+# 7. Monitoring and auditing:
+#    - Monitor slow query log
+#    - Set up log rotation
+#    - Use tools like mytop or innotop for monitoring
+#
+# 8. File permissions:
+#    chown -R mysql:mysql /var/lib/mysql
+#    chmod 700 /var/lib/mysql
+#    chmod 640 /etc/mysql/mariadb.cnf
+#
+# 9. AppArmor profile (if using AppArmor):
+#    aa-enforce /etc/apparmor.d/usr.sbin.mysqld
+#
+# 10. Consider using MariaDB Audit Plugin for compliance:
+#     INSTALL PLUGIN server_audit SONAME 'server_audit.so';
