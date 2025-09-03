@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Debian Security Compliance Checker
+# Debian & Ubuntu Security Compliance Checker
 # ANALYSIS ONLY - NO SYSTEM MODIFICATIONS!
 # 
 # Repository: https://github.com/MalteKiefer/Debian-Security-Compliance
@@ -62,7 +62,7 @@ check_version() {
 # Print functions
 print_header() {
     echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}              Debian Security Compliance Checker v$VERSION${NC}"
+    echo -e "${WHITE}         Debian & Ubuntu Security Compliance Checker v$VERSION${NC}"
     echo -e "${CYAN}                ANALYSIS ONLY - NO SYSTEM MODIFICATIONS${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════════${NC}"
     echo
@@ -217,19 +217,68 @@ vulnerability_audit() {
     # Detect distribution
     local distro="unknown"
     local suite="stable"
+    local ubuntu_codename=""
     
     if [[ -f /etc/os-release ]]; then
         local os_name=$(grep "^NAME=" /etc/os-release | cut -d'"' -f2)
         local version_id=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
         local version_codename=$(grep "^VERSION_CODENAME=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
+        local ubuntu_codename=$(grep "^UBUNTU_CODENAME=" /etc/os-release | cut -d'=' -f2 | tr -d '"' 2>/dev/null)
         
         if [[ $os_name =~ Ubuntu ]]; then
             distro="Ubuntu"
-            suite="$version_codename"
+            # For Ubuntu, prefer UBUNTU_CODENAME if available, otherwise use VERSION_CODENAME
+            if [[ -n "$ubuntu_codename" ]]; then
+                suite="$ubuntu_codename"
+            elif [[ -n "$version_codename" ]]; then
+                suite="$version_codename"
+            else
+                # Fallback mapping for Ubuntu versions
+                case "$version_id" in
+                    "24.04") suite="noble" ;;
+                    "23.10") suite="mantic" ;;
+                    "23.04") suite="lunar" ;;
+                    "22.04") suite="jammy" ;;
+                    "20.04") suite="focal" ;;
+                    "18.04") suite="bionic" ;;
+                    *) suite=$(lsb_release -cs 2>/dev/null || echo "jammy") ;;
+                esac
+            fi
         elif [[ $os_name =~ Debian ]]; then
             distro="Debian"
-            suite="$version_codename"
-            if [[ -z "$suite" ]]; then
+            if [[ -n "$version_codename" ]]; then
+                suite="$version_codename"
+            else
+                # Fallback mapping for Debian versions
+                case "$version_id" in
+                    "13") suite="trixie" ;;
+                    "12") suite="bookworm" ;;
+                    "11") suite="bullseye" ;;
+                    "10") suite="buster" ;;
+                    *) suite=$(lsb_release -cs 2>/dev/null || echo "stable") ;;
+                esac
+            fi
+        else
+            # Try to detect Ubuntu derivatives
+            if grep -q "ubuntu" /etc/os-release 2>/dev/null || [[ -f /etc/upstream-release/lsb-release ]]; then
+                distro="Ubuntu"
+                suite=$(lsb_release -cs 2>/dev/null || echo "jammy")
+            fi
+        fi
+    fi
+    
+    # Additional fallback checks
+    if [[ "$distro" == "unknown" ]]; then
+        if [[ -f /etc/debian_version ]]; then
+            distro="Debian"
+            suite="stable"
+        elif command -v lsb_release >/dev/null 2>&1; then
+            local lsb_id=$(lsb_release -si 2>/dev/null)
+            if [[ "$lsb_id" == "Ubuntu" ]]; then
+                distro="Ubuntu"
+                suite=$(lsb_release -cs 2>/dev/null || echo "jammy")
+            elif [[ "$lsb_id" == "Debian" ]]; then
+                distro="Debian"
                 suite=$(lsb_release -cs 2>/dev/null || echo "stable")
             fi
         fi
@@ -242,16 +291,39 @@ vulnerability_audit() {
     if ! command -v debsecan &> /dev/null; then
         print_status "INFO" "debsecan not found, installing debsecan..."
         if check_root; then
-            apt-get update -qq && apt-get install -y debsecan > /dev/null 2>&1
+            # Update package lists
+            apt-get update -qq > /dev/null 2>&1 || print_status "WARN" "apt-get update failed"
+            
+            # Install debsecan based on distribution
+            if [[ "$distro" == "Ubuntu" ]]; then
+                # On Ubuntu, debsecan might be in universe repository
+                apt-get install -y software-properties-common > /dev/null 2>&1
+                add-apt-repository universe > /dev/null 2>&1 || true
+                apt-get update -qq > /dev/null 2>&1
+                apt-get install -y debsecan > /dev/null 2>&1
+            else
+                # Standard Debian installation
+                apt-get install -y debsecan > /dev/null 2>&1
+            fi
+            
             if ! command -v debsecan &> /dev/null; then
                 print_status "ERROR" "debsecan installation failed"
-                print_status "INFO" "Run: apt-get install debsecan"
+                if [[ "$distro" == "Ubuntu" ]]; then
+                    print_status "INFO" "Run: sudo apt-get install debsecan"
+                    print_status "INFO" "Note: debsecan may not be fully supported on all Ubuntu versions"
+                    print_status "INFO" "Alternative: Use 'apt list --upgradable' to check for updates"
+                else
+                    print_status "INFO" "Run: sudo apt-get install debsecan"
+                fi
                 return 1
             fi
             print_status "OK" "debsecan successfully installed"
         else
             print_status "ERROR" "Root privileges required for debsecan installation"
             print_status "INFO" "Run: sudo apt-get install debsecan"
+            if [[ "$distro" == "Ubuntu" ]]; then
+                print_status "INFO" "Note: May require enabling universe repository on Ubuntu"
+            fi
             return 1
         fi
     fi
@@ -275,28 +347,75 @@ vulnerability_audit() {
     print_status "INFO" "Scanning all installed packages for vulnerabilities..."
     
     # First scan: All vulnerabilities
-    if ! debsecan --suite="$suite" --format=packages 2>/dev/null > "$debsecan_output"; then
-        print_status "WARN" "debsecan with suite '$suite' failed, trying without suite..."
-        if ! debsecan --format=packages 2>/dev/null > "$debsecan_output"; then
-            print_status "ERROR" "debsecan scan failed"
-            rm -f "$debsecan_output" "$debsecan_detail" "$unfixed_vulns"
-            return 1
+    local scan_success=false
+    
+    # Try different scanning approaches based on distribution
+    if [[ "$distro" == "Ubuntu" ]]; then
+        # Ubuntu-specific scanning approach
+        print_status "INFO" "Using Ubuntu-optimized scanning approach..."
+        
+        # Try with Ubuntu suite first
+        if debsecan --suite="$suite" --format=packages 2>/dev/null > "$debsecan_output" && [[ -s "$debsecan_output" ]]; then
+            scan_success=true
+        # Try mapping Ubuntu codename to Debian equivalent
+        elif [[ "$suite" == "noble" ]]; then
+            debsecan --suite=bookworm --format=packages 2>/dev/null > "$debsecan_output" && scan_success=true
+        elif [[ "$suite" == "jammy" ]]; then
+            debsecan --suite=bullseye --format=packages 2>/dev/null > "$debsecan_output" && scan_success=true
+        elif [[ "$suite" == "focal" ]]; then
+            debsecan --suite=buster --format=packages 2>/dev/null > "$debsecan_output" && scan_success=true
+        # Fallback to generic scan for Ubuntu
+        elif debsecan --format=packages 2>/dev/null > "$debsecan_output" && [[ -s "$debsecan_output" ]]; then
+            scan_success=true
+            print_status "WARN" "Using generic debsecan database (Ubuntu-specific data may be limited)"
         fi
+    else
+        # Debian-specific scanning
+        if debsecan --suite="$suite" --format=packages 2>/dev/null > "$debsecan_output" && [[ -s "$debsecan_output" ]]; then
+            scan_success=true
+        elif debsecan --format=packages 2>/dev/null > "$debsecan_output" && [[ -s "$debsecan_output" ]]; then
+            scan_success=true
+            print_status "WARN" "debsecan with suite '$suite' failed, using default database"
+        fi
+    fi
+    
+    if [[ "$scan_success" != "true" ]]; then
+        print_status "ERROR" "debsecan scan failed for $distro $suite"
+        if [[ "$distro" == "Ubuntu" ]]; then
+            print_status "INFO" "Note: debsecan has limited support for Ubuntu"
+            print_status "INFO" "Consider using 'unattended-upgrades --dry-run' for Ubuntu security updates"
+        fi
+        rm -f "$debsecan_output" "$debsecan_detail" "$unfixed_vulns"
+        return 1
     fi
     
     # Second scan: Only unfixed vulnerabilities (if supported)
     print_status "INFO" "Scanning specifically for unfixed vulnerabilities..."
-    debsecan --suite="$suite" --only-fixed=no --format=packages 2>/dev/null > "$unfixed_vulns" || {
-        print_status "WARN" "Scan for unfixed vulnerabilities not available, using main scan"
+    if [[ "$distro" == "Debian" ]]; then
+        debsecan --suite="$suite" --only-fixed=no --format=packages 2>/dev/null > "$unfixed_vulns" || {
+            print_status "WARN" "Scan for unfixed vulnerabilities not available, using main scan"
+            cp "$debsecan_output" "$unfixed_vulns"
+        }
+    else
+        # Ubuntu: unfixed vulnerability scan may not work properly
+        print_status "WARN" "Unfixed vulnerability detection has limited Ubuntu support"
         cp "$debsecan_output" "$unfixed_vulns"
-    }
+    fi
     
     # Third scan: Detailed information
     print_status "INFO" "Collecting detailed vulnerability information..."
-    debsecan --suite="$suite" --format=detail 2>/dev/null > "$debsecan_detail" || {
-        print_status "WARN" "Detailed scan failed, using package format"
-        cp "$debsecan_output" "$debsecan_detail"
-    }
+    if [[ "$distro" == "Debian" ]]; then
+        debsecan --suite="$suite" --format=detail 2>/dev/null > "$debsecan_detail" || {
+            print_status "WARN" "Detailed scan failed, using package format"
+            cp "$debsecan_output" "$debsecan_detail"
+        }
+    else
+        # Ubuntu: detailed scan may have limited information
+        debsecan --format=detail 2>/dev/null > "$debsecan_detail" || {
+            print_status "WARN" "Detailed scan not available for Ubuntu, using package format"
+            cp "$debsecan_output" "$debsecan_detail"
+        }
+    fi
     
     local vuln_count=$(wc -l < "$debsecan_output")
     local unfixed_count=$(wc -l < "$unfixed_vulns")
@@ -382,12 +501,21 @@ vulnerability_audit() {
             echo
             echo "RECOMMENDED ACTIONS:"
             echo "==================="
-            echo "1. Update system regularly: apt update && apt upgrade"
-            echo "2. Monitor critical security updates"
-            if [[ $suite == "trixie" ]]; then
-                echo "3. For production systems use Debian Stable"
+            if [[ $distro == "Ubuntu" ]]; then
+                echo "1. Update system regularly: sudo apt update && sudo apt upgrade"
+                echo "2. Enable automatic security updates: sudo dpkg-reconfigure unattended-upgrades"
+                echo "3. Monitor Ubuntu Security Notices (USN): https://ubuntu.com/security/notices"
+                echo "4. Consider Ubuntu Pro for extended security maintenance"
+                echo "5. Use 'apt list --upgradable' to check for available updates"
+            else
+                echo "1. Update system regularly: apt update && apt upgrade"  
+                echo "2. Monitor Debian Security Advisories (DSA): https://www.debian.org/security/"
+                echo "3. Enable automatic security updates if desired"
+                if [[ $suite == "trixie" ]]; then
+                    echo "4. For production systems use Debian Stable"
+                fi
             fi
-            echo "4. Enable monitoring for critical CVEs"
+            echo "6. Enable monitoring for critical CVEs"
         else
             echo "No vulnerabilities found!"
             echo "All installed packages are up to date."
@@ -515,9 +643,16 @@ vulnerability_audit() {
         fi
         
         echo -e "${WHITE}📅 REGULAR MAINTENANCE:${NC}"
-        echo -e "${CYAN}  • Daily: Run debsecan --suite=$suite${NC}"
-        echo -e "${CYAN}  • Weekly: Complete system update${NC}"
-        echo -e "${CYAN}  • Monthly: Security audit with this tool${NC}"
+        if [[ $distro == "Ubuntu" ]]; then
+            echo -e "${CYAN}  • Daily: Check for updates with 'apt list --upgradable'${NC}"
+            echo -e "${CYAN}  • Weekly: Complete system update with 'sudo apt update && sudo apt upgrade'${NC}"
+            echo -e "${CYAN}  • Monthly: Security audit with this tool${NC}"
+            echo -e "${CYAN}  • Monitor Ubuntu Security Notices: https://ubuntu.com/security/notices${NC}"
+        else
+            echo -e "${CYAN}  • Daily: Run debsecan --suite=$suite${NC}"
+            echo -e "${CYAN}  • Weekly: Complete system update${NC}"
+            echo -e "${CYAN}  • Monthly: Security audit with this tool${NC}"
+        fi
         
         echo -e "\n${WHITE}📊 REPORTS:${NC}"
         echo -e "${CYAN}  • Detailed report: $vuln_report${NC}"
@@ -716,7 +851,7 @@ show_summary() {
 # Usage information
 usage() {
     cat << EOF
-Debian Security Compliance Checker v$VERSION
+Debian & Ubuntu Security Compliance Checker v$VERSION
 
 USAGE:
     $0 [OPTION]
@@ -725,7 +860,7 @@ OPTIONS:
     --quick         Quick dashboard overview (2 minutes)
     --compliance    Full compliance check (10 minutes)
     --audit         Comprehensive security audit (15 minutes)
-    --vulnerabilities,--vulns  Vulnerability audit of all Debian packages
+    --vulnerabilities,--vulns  Vulnerability audit of all installed packages
     --performance   Performance impact analysis
     --json          Generate JSON reports for automation
     --gaps          Gap analysis for action planning
@@ -740,10 +875,16 @@ EXAMPLES:
     $0 --vulnerabilities       # Scan package vulnerabilities
     $0 --all                   # Complete analysis (recommended)
 
+SUPPORTED SYSTEMS:
+    - Debian 10+ (Buster, Bullseye, Bookworm, Trixie)
+    - Ubuntu 18.04+ (Bionic, Focal, Jammy, Noble)
+    - Ubuntu derivatives with dpkg package manager
+
 NOTES:
     - Root privileges required for complete analysis
     - Reports are saved to $OUTPUT_DIR
     - Tool performs ANALYSIS ONLY - no system modifications!
+    - debsecan provides better support for Debian than Ubuntu
     - Repository: $REPO_URL
 
 EOF
